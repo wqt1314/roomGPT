@@ -1,93 +1,32 @@
-import { Ratelimit } from "@upstash/ratelimit";
-import redis from "../../utils/redis";
-import { NextResponse } from "next/server";
-import { headers } from "next/headers";
+// 专门为 Nano Banana 2 优化的渲染代码
+export default async function handler(req, res) {
+  const { imageUrl, theme, room } = req.body;
 
-// Create a new ratelimiter, that allows 5 requests per 24 hours
-const ratelimit = redis
-  ? new Ratelimit({
-      redis: redis,
-      limiter: Ratelimit.fixedWindow(5, "1440 m"),
-      analytics: true,
-    })
-  : undefined;
-
-export async function POST(request: Request) {
-  // Rate Limiter Code
-  if (ratelimit) {
-    const headersList = headers();
-    const ipIdentifier = headersList.get("x-real-ip");
-
-    const result = await ratelimit.limit(ipIdentifier ?? "");
-
-    if (!result.success) {
-      return new Response(
-        "Too many uploads in 1 day. Please try again in a 24 hours.",
-        {
-          status: 429,
-          headers: {
-            "X-RateLimit-Limit": result.limit,
-            "X-RateLimit-Remaining": result.remaining,
-          } as any,
-        }
-      );
-    }
-  }
-
-  const { imageUrl, theme, room } = await request.json();
-
-  // POST request to Replicate to start the image restoration generation process
-  let startResponse = await fetch("https://api.replicate.com/v1/predictions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: "Token " + process.env.REPLICATE_API_KEY,
-    },
-    body: JSON.stringify({
-      version:
-        "854e8727697a057c525cdb45ab037f64ecca770a1769cc52287c2e56472a247b",
-      input: {
-        image: imageUrl,
-        prompt:
-          room === "Gaming Room"
-            ? "a room for gaming with gaming computers, gaming consoles, and gaming chairs"
-            : `a ${theme.toLowerCase()} ${room.toLowerCase()}`,
-        a_prompt:
-          "best quality, extremely detailed, photo from Pinterest, interior, cinematic photo, ultra-detailed, ultra-realistic, award-winning",
-        n_prompt:
-          "longbody, lowres, bad anatomy, bad hands, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality",
-      },
-    }),
-  });
-
-  let jsonStartResponse = await startResponse.json();
-
-  let endpointUrl = jsonStartResponse.urls.get;
-
-  // GET request to get the status of the image restoration process & return the result when it's ready
-  let restoredImage: string | null = null;
-  while (!restoredImage) {
-    // Loop in 1s intervals until the alt text is ready
-    console.log("polling for result...");
-    let finalResponse = await fetch(endpointUrl, {
-      method: "GET",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: "Token " + process.env.REPLICATE_API_KEY,
-      },
-    });
-    let jsonFinalResponse = await finalResponse.json();
-
-    if (jsonFinalResponse.status === "succeeded") {
-      restoredImage = jsonFinalResponse.output;
-    } else if (jsonFinalResponse.status === "failed") {
-      break;
-    } else {
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    }
-  }
-
-  return NextResponse.json(
-    restoredImage ? restoredImage : "Failed to restore image"
+  // 1. 调用 Nano Banana 2 (Gemini 3.1 Flash Image)
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-image-preview:generateContent?key=${process.env.GOOGLE_API_KEY}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{
+          parts: [
+            { text: `你是一个专业的建筑渲染师。请参考这张模型截图的结构，将其渲染成一个精美的${theme}${room}效果图。要求：极致写实，灯光考究，4K 画质。` },
+            { inline_data: { mime_type: "image/png", data: imageUrl.split(",")[1] } }
+          ]
+        }],
+        generationConfig: { response_modalities: ["IMAGE"] }
+      }
+    )
   );
+
+  const data = await response.json();
+  
+  // 2. 提取生成的图片 Base64
+  const generatedBase64 = data.candidates[0].content.parts[0].inline_data.data;
+  
+  // 3. 返回给前端展示
+  res.status(200).json({
+    generated: `data:image/png;base64,${generatedBase64}`
+  });
 }
